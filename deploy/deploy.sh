@@ -107,12 +107,20 @@ fi
 if [ "${WITH_NGINX}" = true ]; then
   echo "═══ (Tùy chọn) Nginx + port 80 ═══"
   apt-get install -y -qq nginx >/dev/null
-  cp "${APP_DIR}/deploy/nginx-sodoanvien.conf" /etc/nginx/sites-available/${SERVICE}
+  mkdir -p /var/www/certbot
+  # Đã có chứng chỉ Let's Encrypt → dùng cấu hình HTTPS (tránh deploy lại làm mất HTTPS)
+  if [ -f /etc/letsencrypt/live/sodoanvien.io.vn/fullchain.pem ]; then
+    cp "${APP_DIR}/deploy/nginx-sodoanvien-ssl.conf" /etc/nginx/sites-available/${SERVICE}
+    echo "→ Dùng cấu hình HTTPS (chứng chỉ Let's Encrypt đã có)"
+  else
+    cp "${APP_DIR}/deploy/nginx-sodoanvien.conf" /etc/nginx/sites-available/${SERVICE}
+    echo "→ Chưa có chứng chỉ: dùng HTTP. Bật HTTPS: certbot certonly --webroot -w /var/www/certbot -d sodoanvien.io.vn -d www.sodoanvien.io.vn rồi chạy lại deploy.sh --nginx"
+  fi
   ln -sf /etc/nginx/sites-available/${SERVICE} /etc/nginx/sites-enabled/${SERVICE}
   rm -f /etc/nginx/sites-enabled/default
   nginx -t && systemctl reload nginx
-  command -v ufw >/dev/null && ufw allow 80/tcp 2>/dev/null || true
-  echo "✅ Nginx đã chạy trên port 80."
+  command -v ufw >/dev/null && { ufw allow 80/tcp; ufw allow 443/tcp; } 2>/dev/null || true
+  echo "✅ Nginx đã chạy (port 80/443)."
 fi
 
 IP=$(curl -s --max-time 4 ifconfig.me || echo "<IP-VPS>")
