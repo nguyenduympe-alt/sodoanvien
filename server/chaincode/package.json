@@ -1,0 +1,8 @@
+{
+  "name": "sodoanvien-chaincode",
+  "version": "1.0.0",
+  "description": "Chaincode quan li so Doan vien - Hyperledger Fabric (Node.js)",
+  "main": "sodoanvien-contract.js",
+  "scripts": { "start": "fabric-chaincode-node start" },
+  "dependencies": { "fabric-contract-api": "^2.5.0", "fabric-shim": "^2.5.0" }
+}

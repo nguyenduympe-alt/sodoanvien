@@ -1,0 +1,74 @@
+=== TÀI LIỆU API - HỆ THỐNG ĐỊNH DANH & QUẢN LÍ SỔ ĐOÀN VIÊN ===
+Base URL: http://<host>:3000/api   |   Auth: Bearer JWT từ POST /auth/login
+
+AUTH
+  POST /auth/login                {username, password}                -> {token, user}
+
+DOAN VIEN (phân quyền theo phạm vi: Đoàn viên tự đọc; Chi đoàn đơn vị mình;
+Liên chi đoàn các đơn vị trực thuộc; Đoàn trường/Quản trị toàn hệ thống)
+  GET  /members?query=&unitId=&status=
+  POST /members                   {memberCode, fullName, dob, gender, className,
+                                   unitId, joinDate, joinPlace, phone, email, cccd...}
+       -> DB + CreateMemberProfile (hash hồ sơ ghi lên ledger)
+  GET  /members/:id               -> hồ sơ + hoạt động + chuyển sinh hoạt + lịch sử ledger + trạng thái khớp hash
+  PATCH/members/:id               {fullName?, phone?, ...}            -> UpdateMemberProfile
+  POST /members/:id/activities    {type: HOAT_DONG|DANH_GIA|KHEN_THUONG|KY_LUAT, title, detail, activityDate}
+       -> RecordActivity
+  GET  /members/:id/history       -> GetMemberHistory (truy vấn ledger)
+  POST /members/:id/verify        {hash?}                             -> VerifyProfileHash
+  POST /members/:id/verify-identity {cccd, fullName?, dob?}           -> xác thực định danh điện tử
+       (VNeID/eKYC qua services/vneid.js; ghi vết VerifyIdentity lên ledger,
+        KHÔNG lưu CCCD trên chain; .env: VNEID_PROVIDER=mock|http)
+
+CHUYEN SINH HOAT (2 bước)
+  GET  /transfers
+  POST /transfers                 {memberId, toUnit, reason}          -> TransferRequest
+  POST /transfers/:id/accept      {note?, newClassName?}              -> TransferAccept (+ UpdateMemberProfile hash mới)
+  POST /transfers/:id/reject      {note?}                             -> TransferReject
+  POST /transfers/:id/retry       gửi lại khi peer từng offline (kịch bản 7)
+
+LEDGER EXPLORER
+  GET  /ledger/blocks?limit=&offset=
+  GET  /ledger/tx/:txId
+  GET  /ledger/orgs
+
+QUAN TRI (vai trò QUAN_TRI)
+  GET  /admin/overview
+  POST /admin/reconcile           đối soát hash on-chain/off-chain toàn bộ hồ sơ
+  GET  /admin/alerts              danh sách cảnh báo
+  POST /admin/alerts/:id/resolve
+  POST /admin/dev/tamper/:memberId {field, value}  [DEMO] giả lập sửa trái phép off-chain
+  POST /admin/backup              tạo snapshot + RecordDailyBackupHash
+  GET  /admin/backups
+  POST /admin/restore             {snapshotId} -> kiểm chứng hash + ConfirmRecovery
+  GET/POST /admin/peers           {mspId, online}  bật/tắt peer mô phỏng
+  GET/POST /admin/users           quản lí tài khoản, PATCH /admin/users/:id
+  POST /admin/reseed              nạp lại dữ liệu demo
+
+NHAP HO SO TU ANH VNeID / CCCD (trang #/intake)
+  POST /intake/extract            {image: dataURL}  -> AI Vision trích xuất
+                                  {fullName, dob, gender, idNumber, mdid} (cần AI_API_KEY)
+  POST /intake/enroll             {fullName, dob?, gender?, idNumber?, className?, unitId?,
+                                   source: vneid_qr|ai_ocr|manual, createAccount: bool}
+                                  -> tạo hồ sơ + (tùy chọn) tài khoản DOAN_VIEN
+                                     trả về {member, account:{username,password tạm - hiện 1 lần}, tx}
+                                  nguồn vneid_qr/ai_ocr có CCCD -> tự ghi vết VerifyIdentity
+  GET  /intake/username-check?u=  kiểm tra tên đăng nhập còn trống
+  GET  /intake/status             trạng thái cấu hình AI Vision + provider VNeID
+
+KHAC
+  GET  /stats                     thống kê dashboard nâng cao theo phạm vi vai trò, gồm:
+                                  total/active/transferPending/locked, byUnit, byGender,
+                                  activityByType, joinTrend (kết nạp theo tháng),
+                                  transfers (theo trạng thái), recentActivities, recentTransfers,
+                                  membersNoActivity, lastReconcile,
+                                  ledger.{blocks, mode, orgs, txStats{txs, byFn, firstTs, lastTs}}
+  GET  /verify?code=<memberCode>&hash=<hash>   xác minh công khai (không cần đăng nhập)
+                                  — đích của QR trên thẻ đoàn viên; có hash → trả hashMatch
+  POST /ai/chat                   {question | messages[]}  lớp AI (cần AI_API_KEY)
+  GET  /docs/api-endpoints.txt    tài liệu này
+
+TRANG GIAO DIỆN (hash routing)
+  #/members/:id/card              thẻ đoàn viên số + QR (in được, có nút tải QR SVG)
+  #/mycard                        thẻ của chính mình (vai trò DOAN_VIEN)
+  #/verify?code=..&hash=..        mở từ QR → tự động xác minh + đối chiếu hash

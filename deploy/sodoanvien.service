@@ -1,0 +1,27 @@
+[Unit]
+Description=Sổ Đoàn viên số - Hyperledger Fabric prototype (API + web)
+After=network.target
+
+[Service]
+Type=simple
+User=sovan
+Group=sovan
+WorkingDirectory=/opt/so-doan-vien/server
+ExecStart=/usr/bin/node src/index.js
+Environment=NODE_ENV=production
+# Giới hạn heap cho VPS 1GB RAM
+Environment=NODE_OPTIONS=--max-old-space-size=384
+EnvironmentFile=-/opt/so-doan-vien/server/.env
+Restart=always
+RestartSec=3
+# Chặn cứng để node không ăn hết RAM hệ thống
+MemoryHigh=500M
+MemoryMax=700M
+# Bảo mật dịch vụ
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/so-doan-vien/server/data
+
+[Install]
+WantedBy=multi-user.target

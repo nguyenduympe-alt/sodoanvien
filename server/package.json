@@ -1,0 +1,17 @@
+{
+  "name": "so-doan-vien-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend - He thong dinh danh & quan li so Doan vien (Hyperledger Fabric)",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "seed": "node src/seed-run.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.10.0",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2"
+  }
+}

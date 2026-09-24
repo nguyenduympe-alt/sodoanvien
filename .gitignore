@@ -1,0 +1,37 @@
+# ===== Dependencies =====
+node_modules/
+client/node_modules/
+server/node_modules/
+
+# ===== Build output =====
+client/dist/
+client/.vite/
+
+# ===== Dữ liệu chạy thời gian thực (KHÔNG commit) =====
+server/data/
+server/fabric-identity/
+server/fabric-config/
+uploads/
+releases/
+
+# ===== Secrets & cấu hình môi trường =====
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.key
+
+# ===== Hệ điều hành / trình soạn thảo =====
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ===== Log & tạm =====
+*.log
+npm-debug.log*
+tmp/
