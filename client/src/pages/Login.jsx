@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { api, setSession, ROLE_LABEL } from '../api.js';
 import { DoanEmblem } from '../components.jsx';
 
@@ -28,6 +28,19 @@ export default function Login({ onLogin }) {
       setErr(ex.message);
     } finally { setBusy(false); }
   };
+
+  // Nền trang đăng nhập phủ kín cả vùng lộ ra khi cuộn quá đáy / thanh địa chỉ co lại (không còn dải trắng sữa)
+  useEffect(() => {
+    document.body.classList.add('login-page');
+    const meta = document.querySelector('meta[name="theme-color"]');
+    const prev = meta && meta.getAttribute('content');
+    // đọc màu sau khi App áp theme (effect của cha chạy sau effect của con)
+    const raf = requestAnimationFrame(() => {
+      const c1 = getComputedStyle(document.body).getPropertyValue('--card-c1').trim();
+      if (meta && c1) meta.setAttribute('content', c1);
+    });
+    return () => { cancelAnimationFrame(raf); document.body.classList.remove('login-page'); if (meta && prev) meta.setAttribute('content', prev); };
+  }, []);
 
   const quick = (u) => { setUsername(u); setPassword('123456'); setErr(''); setTimeout(() => submit(), 30); };
 
