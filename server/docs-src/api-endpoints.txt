@@ -54,7 +54,12 @@ NHAP HO SO TU ANH VNeID / CCCD (trang #/intake)
                                      trả về {member, account:{username,password tạm - hiện 1 lần}, tx}
                                   nguồn vneid_qr/ai_ocr có CCCD -> tự ghi vết VerifyIdentity
   GET  /intake/username-check?u=  kiểm tra tên đăng nhập còn trống
-  GET  /intake/status             trạng thái cấu hình AI Vision + provider VNeID
+  POST /intake/extract  {auto:true}   P2 — xin CỔNG TỰ ĐỘNG: server tự quyết theo ngưỡng
+                                  AI_AUTO_THRESHOLD (0,92): đủ điều kiện → TỰ tạo hồ sơ + tài
+                                  khoản + VerifyIdentity (trả autoCreated); thiếu 1 điều kiện →
+                                  trả autoDecision{auto:false, reason} cho cán bộ xác nhận
+  GET  /intake/status             trạng thái AI: provider (cloud|offline), offlineEngine, autoThreshold
+  GET  /admin/ai-jobs             (Quản trị) nhật kí ai_jobs + thống kê tỉ lệ tự động
 
 KHAC
   GET  /stats                     thống kê dashboard nâng cao theo phạm vi vai trò, gồm:

@@ -13,7 +13,7 @@ const bcrypt = require('bcryptjs');
 const { profileHash, profileCore, txId } = require('./canonical');
 const ledger = require('./ledger/simulator');
 
-const DATA_DIR = path.join(__dirname, '../data');
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, '../data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(path.join(DATA_DIR, 'snapshots'), { recursive: true });
 
@@ -66,6 +66,17 @@ function init() {
     action TEXT, detail TEXT, ip TEXT, createdAt TEXT DEFAULT (datetime('now'))
   );
   CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+  CREATE TABLE IF NOT EXISTS ai_jobs(
+    id TEXT PRIMARY KEY,               -- AIJ-xxxxxxxx
+    type TEXT NOT NULL DEFAULT 'extract',        -- extract | review (P4)
+    status TEXT NOT NULL DEFAULT 'DONE',         -- PENDING | RUNNING | DONE | FAILED
+    model TEXT, imageHash TEXT,
+    confidence REAL, warningsJson TEXT, pass INTEGER,
+    auto INTEGER DEFAULT 0,            -- 1: hệ thống TỰ tạo hồ sơ; 0: nâng cán bộ xác nhận
+    autoReason TEXT, memberId TEXT,
+    createdBy TEXT, ip TEXT,
+    createdAt TEXT DEFAULT (datetime('now')), finishedAt TEXT
+  );
   `);
 
   // Migration nhẹ: bổ sung cột định danh điện tử nếu CSDL cũ chưa có
@@ -73,6 +84,9 @@ function init() {
   for (const col of ['idVerifyStatus', 'idVerifySource', 'idVerifyAt', 'idVerifyRef', 'mdid']) {
     if (!memberCols.includes(col)) db.exec(`ALTER TABLE members ADD COLUMN ${col} TEXT`);
   }
+  // Migration P2: dấu vết AI tự tạo hồ sơ (aiJobId + cờ createdByAi)
+  if (!memberCols.includes('createdByAi')) db.exec('ALTER TABLE members ADD COLUMN createdByAi INTEGER DEFAULT 0');
+  if (!memberCols.includes('aiJobId')) db.exec('ALTER TABLE members ADD COLUMN aiJobId TEXT');
 
   if (countUsers() === 0) seedDemoData();
   // Cung cấp bản đồ đơn vị → liên chi cho cơ chế phân quyền của ledger

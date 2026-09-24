@@ -1,0 +1,29 @@
+[Unit]
+Description=OCR-VN — AI doc anh tieng Viet offline (PP-OCR + VietOCR) cho So Doan vien
+After=network.target
+
+[Service]
+Type=simple
+User=ocrvn
+Group=ocrvn
+WorkingDirectory=/opt/ai-models/ocr-vn
+Environment=HOME=/opt/ai-models/ocr-vn/cache
+Environment=OCR_REC_MODEL=vgg_seq2seq
+Environment=OCR_THREADS=4
+Environment=OCR_IDLE_UNLOAD_S=900
+Environment=OMP_NUM_THREADS=4
+ExecStart=/opt/ai-models/ocr-vn/venv/bin/python -m uvicorn ocr_server:app --host 127.0.0.1 --port 8031 --workers 1 --log-level warning
+Restart=always
+RestartSec=2
+Nice=5
+OOMScoreAdjust=200
+MemoryHigh=1200M
+MemoryMax=1500M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ai-models/ocr-vn/cache
+
+[Install]
+WantedBy=multi-user.target

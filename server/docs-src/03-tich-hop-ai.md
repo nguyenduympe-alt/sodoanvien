@@ -40,6 +40,49 @@ Giao diện (Trợ lí AI)  ──POST /api/ai/chat──▶  Backend (services 
 
 **Bảo mật:** ảnh không được lưu; kết quả chỉ giữ 4 trường nghiệp vụ; mọi lần gọi có audit log.
 
+# 1c. CỔNG TỰ ĐỘNG NHẬP LIỆU P2 (ĐÃ TRIỂN KHAI)
+
+Luồng "AI nhập thay cán bộ" với điều kiện an toàn — **đủ 4 điều kiện mới tự tạo hồ sơ, thiếu 1 → nâng cán bộ**:
+
+| Điều kiện tự động | Ý nghĩa |
+|---|---|
+| Đủ 4 trường bắt buộc (họ tên, ngày sinh, giới tính, CCCD) | Không hồ sơ dang dở |
+| `confidence ≥ AI_AUTO_THRESHOLD` (mặc định **0,92**) | AI chắc chắn |
+| **0 cảnh báo** trong `warnings[]` | Không có vùng ảnh mờ/chói |
+| Không trùng CCCD trong DB | Không trùng hồ sơ |
+
+Thành phần kèm theo:
+- **Chấm chất lượng ảnh ngay trên trình duyệt** (trước khi tốn token AI): độ mờ = phương sai Laplacian trên ảnh xám + độ sáng trung bình; ảnh mờ quá (blur < 25) bị chặn với lời khuyên chụp lại.
+- **Bảng `ai_jobs`**: nhật kí mỗi lần AI đọc ảnh — model, điểm tin cậy, cảnh báo, quyết định tự động + lý do, hồ sơ tạo ra (`memberId`), người gọi, thời điểm. Xem tại `GET /api/admin/ai-jobs` (Quản trị) kèm thống kê tỉ lệ tự động.
+- **Dấu vết hồ sơ**: thành viên tự tạo có cờ `createdByAi=1` + `aiJobId` (off-chain), notes ghi rõ job + model + điểm; lịch sử `CreateMemberProfile`/`VerifyIdentity` trên ledger không đổi.
+- **Chống sai**: quyết định tự động do SERVER tính (từ kết quả AI đã chuẩn hóa), không tin tham số client; trùng CCCD luôn nâng cán bộ; Đoàn trường chưa chọn chi đoàn tiếp nhận → nâng.
+- **Chế độ DEMO**: `AI_MOCK_EXTRACT=1` → extract trả kết quả mẫu (tin cậy 0,97) không cần key — để diễn đạt luồng tự động khi thuyết trình; mặc định TẮT, không bao giờ bật ở sản xuất.
+
+Cấu hình: `AI_AUTO_THRESHOLD=0.92` (0–1, đổi được qua `.env`). API: `POST /api/intake/extract` nhận thêm `{auto: true}` → phản hồi thêm `jobId, autoDecision{auto, reason}, autoCreated?{member, account, tx, verifyTx}`.
+
+# 1d. ENGINE AI OFFLINE — TESSERACT OCR + QUY TẮC (ĐÃ TRIỂN KHAI)
+
+Trích xuất định danh **không cần internet, không cần API key, không tốn phí** — ảnh không rời khỏi server:
+
+```
+Ảnh (base64) → tesseract -l vie --psm 6 (TSV, kèm độ tin cậy từng từ)
+   → Bộ phân tích quy tắc: nhãn thẻ (Số/No., Họ và tên, Ngày sinh, Giới tính…)
+      + biểu thức chính quy (12 số CCCD có/không dấu chấm, dd/mm/yyyy, Nam/Nữ)
+      + kiểm tra chéo CCCD[3:5] ↔ 2 số cuối năm sinh (sai → cảnh báo)
+   → fields{fullName, dob, gender, idNumber, confidence, warnings[]}  ← CÙNG SCHEMA cloud AI
+   → đi thẳng CỔNG TỰ ĐỘNG P2 (≥0,92 + 0 cảnh báo + không trùng → tự tạo hồ sơ)
+```
+
+- **Cài đặt server**: `apt install tesseract-ocr tesseract-ocr-vie` (đã đưa vào `deploy.sh` — tự cài khi triển khai).
+- **Chọn engine** bằng `AI_PROVIDER`: `auto` (mặc định — có key dùng cloud, không key dùng offline) | `cloud` | `offline`. Xem trạng thái tại `GET /api/intake/status`.
+- **Điểm tin cậy** tính từ độ tin cậy OCR từng từ vùng giá trị + thưởng khớp chéo (+0,02) + phạt theo số trường thiếu; ảnh mờ → conf tụt và/hoặc warning → cổng tự động **tự nâng cán bộ** (đã kiểm chứng: ảnh mờ 2,2px → conf 0,77 → nâng).
+- **Bảo mật tốt hơn cloud**: ảnh base64 chỉ ghi vào file tạm trong quá trình OCR rồi xóa ngay; không có request ra ngoài.
+- **Hạn chế so với cloud**: chữ viết tay, ảnh chéo nghiêng nặng, thẻ cũ bạc màu — OCR cổ điển đọc kém hơn; khi đó hệ thống tự nâng cán bộ (không bao giờ "bịa" dữ liệu).
+- **Huấn luyện riêng model cho thẻ CCCD** (`TESS_LANG=vie_cccd`): fine-tune Tesseract bằng dữ liệu tổng hợp — xem tài liệu `docs/12-du-lieu-huan-luyen-ocr-cccd-viet-tay.md` + công cụ `tools/gen-cccd-synth.py`.
+- **Nâng cấp lên MÔ HÌNH NƠ-RON OFFLINE THẬT** (không đổi code): cài [Ollama](https://ollama.com) trên máy ≥8GB RAM → `ollama pull qwen2.5vl:7b` → đặt `AI_BASE_URL=http://127.0.0.1:11434/v1`, `AI_VISION_MODEL=qwen2.5vl:7b`, `AI_API_KEY=ollama` — hệ thống tự dùng model nơ-ron cục bộ thay cloud, vẫn chi phí 0đ và ảnh không rời máy. Lưu ý: VPS 1–4GB chỉ chạy được Tesseract; Ollama cần máy mạnh hơn (máy trạm/PC phòng Công tác Đoàn).
+
+**Vị trí code**: `server/src/services/aiOffline.js` (engine) — được gọi từ `POST /api/intake/extract` khi provider = offline.
+
 # 2. Giai đoạn 1 — Trợ lí hỏi đáp nghiệp vụ (khung đã có)
 
 - Hỏi đáp về quy trình (tạo hồ sơ, chuyển sinh hoạt, đối soát…) dựa trên **system prompt** chứa ngữ cảnh hệ thống + dữ liệu thống kê thời gian thực.

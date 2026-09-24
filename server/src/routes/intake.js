@@ -15,6 +15,7 @@ const { profileHash, profileCore, sha256Hex, canonicalize, txId } = require('../
 const ledger = require('../ledger/simulator');
 const config = require('../config');
 const { ledgerError } = require('./members');
+const aiOffline = require('../services/aiOffline');
 
 const router = express.Router();
 
@@ -38,6 +39,35 @@ function genMemberCode() {
   let code = `DV${year}${String(n).padStart(4, '0')}`;
   while (db.prepare('SELECT 1 FROM members WHERE memberCode=?').get(code)) { n += 1; code = `DV${year}${String(n).padStart(4, '0')}`; }
   return code;
+}
+
+/* ---------- P2: Cổng tự động nhập liệu + nhật kí AI (bảng ai_jobs) ---------- */
+function newJobId() { return `AIJ-${txId().slice(0, 10).toUpperCase()}`; }
+
+function logJob({ id, type = 'extract', status = 'DONE', model = null, imageHash = null,
+                  confidence = null, warnings = [], pass = null, auto = 0, autoReason = null,
+                  memberId = null, user = null }) {
+  try {
+    db.prepare(`INSERT INTO ai_jobs(id,type,status,model,imageHash,confidence,warningsJson,pass,auto,autoReason,memberId,createdBy,finishedAt)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`)
+      .run(id, type, status, model, imageHash, confidence, JSON.stringify(warnings || []).slice(0, 1000),
+           pass, auto, autoReason, memberId, user ? user.username : null);
+  } catch { /* nhật kí lỗi không được chặn nghiệp vụ */ }
+}
+
+/** Cổng tự động P2 (hàm thuần — unit-test được): có TỰ tạo hồ sơ từ kết quả AI không?
+ *  Đủ điều kiện KHI: đủ 4 trường bắt buộc + tin cậy ≥ ngưỡng + KHÔNG cảnh báo + KHÔNG trùng. */
+function decideAuto(fields, opts = {}) {
+  const threshold = typeof opts.threshold === 'number' ? opts.threshold : config.AI_AUTO_THRESHOLD;
+  const f = fields || {};
+  const conf = typeof f.confidence === 'number' ? f.confidence : 0;
+  const warnings = Array.isArray(f.warnings) ? f.warnings : [];
+  const missing = ['fullName', 'dob', 'gender', 'idNumber'].filter((k) => !f[k]);
+  if (missing.length) return { auto: false, reason: `Thiếu trường bắt buộc: ${missing.join(', ')}` };
+  if (conf < threshold) return { auto: false, reason: `Điểm tin cậy ${conf.toFixed(2)} dưới ngưỡng tự động ${threshold.toFixed(2)} — chuyển cán bộ xác nhận` };
+  if (warnings.length) return { auto: false, reason: `Có ${warnings.length} cảnh báo cần người rà: ${warnings[0]}` };
+  if (opts.duplicate) return { auto: false, reason: opts.duplicate };
+  return { auto: true, reason: `Đủ điều kiện tự động: tin cậy ${conf.toFixed(2)} ≥ ${threshold.toFixed(2)}, không cảnh báo, không trùng` };
 }
 
 /* ============ 1) AI VISION ĐỌC ẢNH (POST /intake/extract) ============
@@ -136,7 +166,19 @@ async function callVision(imageDataUrl, extraMessages = []) {
 }
 
 router.post('/intake/extract', requireAuth('CHI_DOAN', 'LIEN_CHI', 'DOAN_TRUONG', 'QUAN_TRI'), async (req, res) => {
-  if (!config.AI_API_KEY) {
+  const mockMode = config.AI_MOCK_EXTRACT; // CHỈ DEMO: kết quả mẫu, không cần key
+  // P2b — chọn engine: mock (demo) → offline Tesseract → cloud AI Vision
+  const provider = config.AI_PROVIDER === 'cloud' ? 'cloud'
+    : config.AI_PROVIDER === 'offline' ? 'offline'
+    : (config.AI_API_KEY ? 'cloud' : 'offline');
+  const offlineOk = aiOffline.available();
+  if (mockMode) { /* demo đi tiếp */ }
+  else if (provider === 'offline' && !offlineOk) {
+    return res.status(503).json({
+      error: 'Chưa có engine AI nào: (1) offline — bật dịch vụ ocr-vn (systemctl start ocr-vn) hoặc cài tesseract-ocr-vie, hoặc (2) đám mây — điền AI_API_KEY vào server/.env. Tạm thời dùng kênh Quét QR VNeID hoặc Nhập tay.',
+      code: 'AI_NOT_CONFIGURED',
+    });
+  } else if (provider === 'cloud' && !config.AI_API_KEY) {
     return res.status(503).json({
       error: 'Chức năng AI đọc ảnh cần cấu hình AI_API_KEY (model hỗ trợ ảnh như gpt-4o-mini). Hiện có thể dùng kênh Quét QR VNeID hoặc Nhập tay.',
       code: 'AI_NOT_CONFIGURED',
@@ -146,31 +188,80 @@ router.post('/intake/extract', requireAuth('CHI_DOAN', 'LIEN_CHI', 'DOAN_TRUONG'
   if (!img.startsWith('data:image/')) return res.status(400).json({ error: 'Thiếu ảnh (data:image/...;base64,...)' });
   if (img.length > 8000000) return res.status(413).json({ error: 'Ảnh quá lớn — hãy chụp lại với độ phân giải thấp hơn' });
 
+  const jobId = newJobId();
+  const imageHash = sha256Hex(img).slice(0, 16); // vết ảnh (không lưu ảnh)
+  let model = mockMode ? 'mock-demo (AI_MOCK_EXTRACT)'
+    : provider === 'offline' ? `${aiOffline.engineInfo().name} (offline)`
+    : (process.env.AI_VISION_MODEL || config.AI_MODEL);
   try {
-    // Lượt 1
-    let fields = normalizeExtract(await callVision(img));
-    let problems = validateExtract(fields);
-    let pass = 1;
-    // Lượt 2: tự sửa nếu thiếu/sai
-    if (problems.length) {
-      pass = 2;
-      const fixed = normalizeExtract(await callVision(img, [
-        { role: 'assistant', content: JSON.stringify(fields) },
-        { role: 'user', content: 'Kết quả trước CÓ LỖI: ' + problems.join('; ') +
-          '. Hãy nhìn kỹ lại ảnh (có thể phóng các vùng chữ nhỏ) và trả về JSON đã SỬA đúng quy tắc.' },
-      ]));
-      const problems2 = validateExtract(fixed);
-      if (problems2.length <= problems.length) {
-        fixed.warnings = [...new Set([...fixed.warnings, ...problems2.map((p) => 'Cần rà tay: ' + p)])];
-        fields = fixed;
-        problems = problems2;
-      } else {
-        fields.warnings = [...new Set([...fields.warnings, ...problems.map((p) => 'Cần rà tay: ' + p)])];
+    let fields, pass = 1;
+    if (mockMode) {
+      fields = normalizeExtract({ fullName: 'Trần Thị Hoài An', dob: '18/03/2006', gender: 'Nữ',
+        idNumber: '205123456789', confidence: 0.97, warnings: [] });
+    } else if (provider === 'offline') {
+      // Engine offline: OCR + quy tắc — 1 lượt, xác định (không retry LLM)
+      const r = await aiOffline.extract(img);
+      fields = normalizeExtract(r.fields);
+      if (r.meta && r.meta.engine) model = r.meta.engine;
+    } else {
+      // Lượt 1 (cloud)
+      fields = normalizeExtract(await callVision(img));
+      let problems = validateExtract(fields);
+      // Lượt 2: tự sửa nếu thiếu/sai (chỉ cloud — offline là xác định 1 lượt)
+      if (problems.length && provider === 'cloud') {
+        pass = 2;
+        const fixed = normalizeExtract(await callVision(img, [
+          { role: 'assistant', content: JSON.stringify(fields) },
+          { role: 'user', content: 'Kết quả trước CÓ LỖI: ' + problems.join('; ') +
+            '. Hãy nhìn kỹ lại ảnh (có thể phóng các vùng chữ nhỏ) và trả về JSON đã SỬA đúng quy tắc.' },
+        ]));
+        const problems2 = validateExtract(fixed);
+        if (problems2.length <= problems.length) {
+          fixed.warnings = [...new Set([...fixed.warnings, ...problems2.map((p) => 'Cần rà tay: ' + p)])];
+          fields = fixed;
+          problems = problems2;
+        } else {
+          fields.warnings = [...new Set([...fields.warnings, ...problems.map((p) => 'Cần rà tay: ' + p)])];
+        }
       }
     }
-    audit(req, 'Intake.Extract.AI', `${fields.fullName || '?'} pass=${pass}`);
-    res.json({ fields, source: 'ai_ocr', model: process.env.AI_VISION_MODEL || config.AI_MODEL, pass });
+
+    // Kiểm tra trùng CCCD TRƯỚC khi ra quyết định tự động
+    let duplicate = null;
+    if (fields.idNumber) {
+      const dup = db.prepare('SELECT memberCode FROM members WHERE cccd=?').get(fields.idNumber);
+      if (dup) duplicate = `Trùng số CCCD với hồ sơ đã có (${dup.memberCode})`;
+    }
+
+    // ── CỔNG TỰ ĐỘNG P2 ──
+    const wantAuto = req.body && req.body.auto === true;
+    const unitOk = req.user.role === 'CHI_DOAN' ? req.user.unitId : ((req.body && req.body.unitId) || null);
+    let decision = decideAuto(fields, { duplicate });
+    if (decision.auto && !unitOk) decision = { auto: false, reason: 'Chưa xác định chi đoàn tiếp nhận — cán bộ cần chọn đơn vị' };
+
+    if (wantAuto && decision.auto) {
+      try {
+        const autoCreated = enrollCore(req.user, {
+          fullName: fields.fullName, dob: fields.dob, gender: fields.gender, idNumber: fields.idNumber,
+          className: fields.className || undefined,
+          source: 'ai_ocr', createAccount: true,
+          notes: `Tự động bởi AI (${jobId}, model ${model}, tin cậy ${Number(fields.confidence).toFixed(2)})`,
+          auto: true, jobId,
+        });
+        logJob({ id: jobId, model, imageHash, confidence: fields.confidence, warnings: fields.warnings,
+                 pass, auto: 1, autoReason: decision.reason, memberId: autoCreated.member.id, user: req.user });
+        audit(req, 'Intake.AutoEnroll', `${autoCreated.member.id} (${fields.fullName}) job=${jobId} conf=${Number(fields.confidence).toFixed(2)}`);
+        return res.json({ fields, source: 'ai_ocr', model, pass, jobId, autoCreated, autoDecision: decision, mock: mockMode || undefined });
+      } catch (e) {
+        decision = { auto: false, reason: 'Tự tạo hồ sơ thất bại: ' + e.message + ' — chuyển cán bộ' };
+      }
+    }
+    logJob({ id: jobId, model, imageHash, confidence: fields.confidence, warnings: fields.warnings,
+             pass, auto: 0, autoReason: decision.reason, user: req.user });
+    audit(req, 'Intake.Extract.AI', `${fields.fullName || '?'} pass=${pass} job=${jobId} auto=${decision.auto ? 'eligible' : 'no'}`);
+    res.json({ fields, source: 'ai_ocr', model, pass, jobId, autoDecision: decision, mock: mockMode || undefined });
   } catch (e) {
+    logJob({ id: jobId, status: 'FAILED', model, imageHash, autoReason: e.message, user: req.user });
     if (e.raw) return res.status(502).json({ error: 'AI trả về dữ liệu không đọc được: ' + e.raw });
     res.status(502).json({ error: 'Lỗi khi gọi AI: ' + e.message });
   }
@@ -184,21 +275,31 @@ router.get('/intake/status', requireAuth(), (req, res) => {
     baseUrl: config.AI_BASE_URL,
     vneidProvider: (require('../services/vneid').PROVIDER) || 'mock',
     qrOffline: true,
+    // P2 — cổng tự động
+    autoThreshold: config.AI_AUTO_THRESHOLD,
+    mockExtract: config.AI_MOCK_EXTRACT,
+    autoAvailable: !!config.AI_API_KEY || config.AI_MOCK_EXTRACT || aiOffline.available(),
+    // P2b — engine offline
+    offlineEngine: { available: aiOffline.available(), ...aiOffline.engineInfo() },
+    provider: config.AI_PROVIDER === 'cloud' ? 'cloud'
+      : config.AI_PROVIDER === 'offline' ? 'offline'
+      : (config.AI_API_KEY ? 'cloud' : (aiOffline.available() ? 'offline' : 'none')),
   });
 });
 
-/* ============ 2) TẠO HỒ SƠ + TÀI KHOẢN (POST /intake/enroll) ============ */
-router.post('/intake/enroll', requireAuth('CHI_DOAN', 'DOAN_TRUONG'), (req, res) => {
-  const b = req.body || {};
-  if (!b.fullName || !String(b.fullName).trim()) return res.status(400).json({ error: 'Thiếu họ tên' });
+/* ============ 2) TẠO HỒ SƠ + TÀI KHOẢN ============
+ * enrollCore: dùng chung cho route POST /intake/enroll VÀ cổng tự động P2 (extract auto).
+ * Ném Error kèm .status khi dữ liệu sai; trả { member, account, tx, verifyTx }. */
+function enrollCore(user, b) {
+  if (!b.fullName || !String(b.fullName).trim()) throw Object.assign(new Error('Thiếu họ tên'), { status: 400 });
   const cccd = b.idNumber ? String(b.idNumber).replace(/\D/g, '') : '';
-  if (b.idNumber && cccd.length !== 12) return res.status(400).json({ error: 'CCCD phải gồm đúng 12 chữ số' });
+  if (b.idNumber && cccd.length !== 12) throw Object.assign(new Error('CCCD phải gồm đúng 12 chữ số'), { status: 400 });
 
   let unitId = b.unitId;
-  if (req.user.role === 'CHI_DOAN') unitId = req.user.unitId;
-  if (!db.prepare('SELECT id FROM units WHERE id=?').get(unitId)) return res.status(400).json({ error: 'Đơn vị không hợp lệ' });
+  if (user.role === 'CHI_DOAN') unitId = user.unitId;
+  if (!db.prepare('SELECT id FROM units WHERE id=?').get(unitId)) throw Object.assign(new Error('Đơn vị không hợp lệ'), { status: 400 });
   if (cccd && db.prepare('SELECT id FROM members WHERE cccd=?').get(cccd)) {
-    return res.status(409).json({ error: `Số CCCD này đã tồn tại trong hệ thống` });
+    throw Object.assign(new Error('Số CCCD này đã tồn tại trong hệ thống'), { status: 409 });
   }
 
   const id = `DV-${new Date().getFullYear()}-${crypto.randomInt(1000, 9999)}`;
@@ -215,11 +316,11 @@ router.post('/intake/enroll', requireAuth('CHI_DOAN', 'DOAN_TRUONG'), (req, res)
   // Ledger trước — nếu từ chối thì không tạo gì ở DB (quy tắc ghi kép)
   let led;
   try {
-    led = ledger.submit(req.user, 'CreateMemberProfile', {
+    led = ledger.submit(user, 'CreateMemberProfile', {
       memberId: id, memberCode, unitId, unitName: unitName(unitId), profileHash: pHash,
-      createdBy: `${req.user.username} (nhập từ ${b.source || 'manual'})`,
+      createdBy: `${user.username} (nhập từ ${b.source || 'manual'}${b.auto ? ', TỰ ĐỘNG theo cổng tin cậy' : ''})`,
     });
-  } catch (e) { return ledgerError(res, e); }
+  } catch (e) { throw Object.assign(new Error(e.message || 'Lỗi ledger'), { status: 503, ledger: true }); }
 
   // Xác thực định danh ngay nếu dữ liệu đến từ QR VNeID / AI đọc được CCCD
   let verifyTx = null;
@@ -227,7 +328,7 @@ router.post('/intake/enroll', requireAuth('CHI_DOAN', 'DOAN_TRUONG'), (req, res)
   if ((b.source === 'vneid_qr' || b.source === 'ai_ocr') && cccd) {
     const resultHash = sha256Hex(canonicalize({ memberId: id, cccdLast4: cccd.slice(-4), src: b.source, at: new Date().toISOString() }));
     try {
-      verifyTx = ledger.submit(req.user, 'VerifyIdentity', {
+      verifyTx = ledger.submit(user, 'VerifyIdentity', {
         memberId: id, resultHash, provider: b.source === 'vneid_qr' ? 'VNeID QR (mức 2)' : 'AI đọc ảnh',
         note: 'Kết nạp kèm xác thực định danh điện tử',
       });
@@ -243,12 +344,13 @@ router.post('/intake/enroll', requireAuth('CHI_DOAN', 'DOAN_TRUONG'), (req, res)
   const createAccount = b.createAccount !== false;
   try {
     db.transaction(() => {
-      db.prepare(`INSERT INTO members(id,memberCode,fullName,dob,gender,cccd,phone,email,className,unitId,joinDate,joinPlace,homeAddress,notes,status,profileHash,lastTxId,lastSyncAt,updatedAt,idVerifyStatus,idVerifySource,idVerifyAt,idVerifyRef,mdid)
-                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE',?,?,datetime('now'),datetime('now'),?,?,?,?,?)`)
+      db.prepare(`INSERT INTO members(id,memberCode,fullName,dob,gender,cccd,phone,email,className,unitId,joinDate,joinPlace,homeAddress,notes,status,profileHash,lastTxId,lastSyncAt,updatedAt,idVerifyStatus,idVerifySource,idVerifyAt,idVerifyRef,mdid,createdByAi,aiJobId)
+                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE',?,?,datetime('now'),datetime('now'),?,?,?,?,?,?,?)`)
         .run(id, memberCode, profile.fullName, profile.dob, profile.gender, cccd, profile.phone, profile.email,
           profile.className, unitId, profile.joinDate, profile.joinPlace, profile.homeAddress, b.notes || '',
           pHash, led.txId, idVerify.idVerifyStatus || null, idVerify.idVerifySource || null,
-          idVerify.idVerifyAt || null, idVerify.idVerifyRef || null, idVerify.mdid || null);
+          idVerify.idVerifyAt || null, idVerify.idVerifyRef || null, idVerify.mdid || null,
+          b.auto ? 1 : 0, b.jobId || null);
 
       if (createAccount) {
         const username = b.username ? String(b.username).trim().toLowerCase() : genUsername(slugName(profile.fullName));
@@ -260,15 +362,24 @@ router.post('/intake/enroll', requireAuth('CHI_DOAN', 'DOAN_TRUONG'), (req, res)
       }
     })();
   } catch (e) {
+    if (e.message === 'Tên đăng nhập đã tồn tại') throw Object.assign(new Error(e.message), { status: 409 });
+    throw Object.assign(new Error('Lỗi khi tạo dữ liệu: ' + e.message), { status: 500 });
+  }
+
+  audit({ user }, 'Intake.Enroll', `${id} (${profile.fullName}) source=${b.source || 'manual'}${b.auto ? ' AUTO' : ''} account=${account ? account.username : 'không'}`);
+  return {
+    member: db.prepare('SELECT id, memberCode, fullName, unitId, idVerifyStatus, profileHash FROM members WHERE id=?').get(id),
+    account, tx: led, verifyTx: verifyTx ? verifyTx.txId : null,
+  };
+}
+
+router.post('/intake/enroll', requireAuth('CHI_DOAN', 'DOAN_TRUONG'), (req, res) => {
+  try {
+    res.status(201).json(enrollCore(req.user, req.body || {}));
+  } catch (e) {
     if (e.status) return res.status(e.status).json({ error: e.message });
     return res.status(500).json({ error: 'Lỗi khi tạo dữ liệu: ' + e.message });
   }
-
-  audit(req, 'Intake.Enroll', `${id} (${profile.fullName}) source=${b.source || 'manual'} account=${account ? account.username : 'không'}`);
-  res.status(201).json({
-    member: db.prepare('SELECT id, memberCode, fullName, unitId, idVerifyStatus, profileHash FROM members WHERE id=?').get(id),
-    account, tx: led, verifyTx: verifyTx ? verifyTx.txId : null,
-  });
 });
 
 /* ============ 3) Gợi ý tên đăng nhập trống (check realtime) ============ */
@@ -278,4 +389,4 @@ router.get('/intake/username-check', requireAuth('CHI_DOAN', 'DOAN_TRUONG'), (re
   res.json({ available: !db.prepare('SELECT 1 FROM users WHERE username=?').get(u) });
 });
 
-module.exports = { router };
+module.exports = { router, decideAuto };

@@ -1,0 +1,14 @@
+# Cài torch bản CPU trước:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+rapidocr_onnxruntime==1.4.4
+onnxruntime>=1.18
+opencv-python-headless>=4.9
+fastapi>=0.110
+uvicorn[standard]>=0.29
+einops
+pyyaml
+requests
+pillow
+numpy
+gdown
+tqdm
+# vietocr cài riêng với --no-deps (bản pypi ghim pillow/imgaug cũ, không cần khi chỉ suy luận)

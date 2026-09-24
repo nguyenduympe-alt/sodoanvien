@@ -117,6 +117,20 @@ router.patch('/admin/users/:id', ADMIN, (req, res) => {
   res.json({ user: db.prepare('SELECT id,username,displayName,role,unitId,active FROM users WHERE id=?').get(u.id) });
 });
 
+/* ---------- P2: Nhật kí + thống kê AI nhập liệu tự động ---------- */
+router.get('/admin/ai-jobs', ADMIN, (req, res) => {
+  const jobs = db.prepare('SELECT * FROM ai_jobs ORDER BY createdAt DESC, id DESC LIMIT 100').all()
+    .map((j) => ({ ...j, warnings: j.warningsJson ? JSON.parse(j.warningsJson) : [], warningsJson: undefined }));
+  const agg = db.prepare(`SELECT COUNT(*) total, COALESCE(SUM(auto),0) autoCount, AVG(confidence) avgConf
+                          FROM ai_jobs WHERE type='extract' AND status='DONE'`).get();
+  res.json({ jobs, stats: {
+    total: agg.total || 0, autoCount: agg.autoCount || 0,
+    escalated: (agg.total || 0) - (agg.autoCount || 0),
+    autoRate: agg.total ? Math.round((agg.autoCount / agg.total) * 100) : 0,
+    avgConfidence: agg.avgConf != null ? Math.round(agg.avgConf * 1000) / 1000 : null,
+  } });
+});
+
 /* ---------- Nạp lại dữ liệu demo ---------- */
 router.post('/admin/reseed', ADMIN, (req, res) => {
   reseed();

@@ -40,6 +40,26 @@ Giao diện (Trợ lí AI)  ──POST /api/ai/chat──▶  Backend (services 
 
 **Bảo mật:** ảnh không được lưu; kết quả chỉ giữ 4 trường nghiệp vụ; mọi lần gọi có audit log.
 
+# 1c. CỔNG TỰ ĐỘNG NHẬP LIỆU P2 (ĐÃ TRIỂN KHAI)
+
+Luồng "AI nhập thay cán bộ" với điều kiện an toàn — **đủ 4 điều kiện mới tự tạo hồ sơ, thiếu 1 → nâng cán bộ**:
+
+| Điều kiện tự động | Ý nghĩa |
+|---|---|
+| Đủ 4 trường bắt buộc (họ tên, ngày sinh, giới tính, CCCD) | Không hồ sơ dang dở |
+| `confidence ≥ AI_AUTO_THRESHOLD` (mặc định **0,92**) | AI chắc chắn |
+| **0 cảnh báo** trong `warnings[]` | Không có vùng ảnh mờ/chói |
+| Không trùng CCCD trong DB | Không trùng hồ sơ |
+
+Thành phần kèm theo:
+- **Chấm chất lượng ảnh ngay trên trình duyệt** (trước khi tốn token AI): độ mờ = phương sai Laplacian trên ảnh xám + độ sáng trung bình; ảnh mờ quá (blur < 25) bị chặn với lời khuyên chụp lại.
+- **Bảng `ai_jobs`**: nhật kí mỗi lần AI đọc ảnh — model, điểm tin cậy, cảnh báo, quyết định tự động + lý do, hồ sơ tạo ra (`memberId`), người gọi, thời điểm. Xem tại `GET /api/admin/ai-jobs` (Quản trị) kèm thống kê tỉ lệ tự động.
+- **Dấu vết hồ sơ**: thành viên tự tạo có cờ `createdByAi=1` + `aiJobId` (off-chain), notes ghi rõ job + model + điểm; lịch sử `CreateMemberProfile`/`VerifyIdentity` trên ledger không đổi.
+- **Chống sai**: quyết định tự động do SERVER tính (từ kết quả AI đã chuẩn hóa), không tin tham số client; trùng CCCD luôn nâng cán bộ; Đoàn trường chưa chọn chi đoàn tiếp nhận → nâng.
+- **Chế độ DEMO**: `AI_MOCK_EXTRACT=1` → extract trả kết quả mẫu (tin cậy 0,97) không cần key — để diễn đạt luồng tự động khi thuyết trình; mặc định TẮT, không bao giờ bật ở sản xuất.
+
+Cấu hình: `AI_AUTO_THRESHOLD=0.92` (0–1, đổi được qua `.env`). API: `POST /api/intake/extract` nhận thêm `{auto: true}` → phản hồi thêm `jobId, autoDecision{auto, reason}, autoCreated?{member, account, tx, verifyTx}`.
+
 # 2. Giai đoạn 1 — Trợ lí hỏi đáp nghiệp vụ (khung đã có)
 
 - Hỏi đáp về quy trình (tạo hồ sơ, chuyển sinh hoạt, đối soát…) dựa trên **system prompt** chứa ngữ cảnh hệ thống + dữ liệu thống kê thời gian thực.

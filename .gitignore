@@ -35,3 +35,9 @@ desktop.ini
 *.log
 npm-debug.log*
 tmp/
+
+# ===== OCR-VN (mô hình tải bằng install.sh, không commit) =====
+ai/ocr-vn/models/
+ai/ocr-vn/venv/
+ai/ocr-vn/cache/
+__pycache__/

@@ -86,7 +86,8 @@ export default function Intake({ me }) {
               {tab === 'qr' && <QrScanner onDecoded={(fields) => { applyFields(fields, 'vneid_qr'); toast('Đã đọc QR định danh — kiểm tra thông tin bên phải', 'ok'); }} />}
               {tab === 'ai' && (
                 <AiReader me={me} ai={ai}
-                  onExtracted={(fields) => { applyFields(fields, 'ai_ocr'); toast('AI đã trích xuất — kiểm tra kỹ thông tin bên phải', 'ok'); }} />
+                  onExtracted={(fields) => { applyFields(fields, 'ai_ocr'); toast('AI đã trích xuất — kiểm tra kỹ thông tin bên phải', 'ok'); }}
+                  onAuto={(r) => { setSource('ai_ocr'); setDone(r); toast(`🤖 AI tự động tạo hồ sơ ${r.member.memberCode} — tin cậy ${Math.round((r.fields?.confidence || 0) * 100)}%`, 'ok'); }} />
               )}
               {tab === 'manual' && (
                 <div className="note blue" style={{ fontSize: 12.5 }}>
@@ -283,22 +284,31 @@ function parseQr(text) {
 }
 
 /* ================= Kênh 2: AI Vision đọc ảnh ================= */
-function AiReader({ me, ai, onExtracted }) {
+function AiReader({ me, ai, onExtracted, onAuto }) {
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState(null);
   const [err, setErr] = useState('');
   const [meta, setMeta] = useState(null);
+  const [quality, setQuality] = useState(null);
 
   const handle = async (dataUrl) => {
-    setPreview(dataUrl); setErr(''); setMeta(null); setBusy(true);
+    setPreview(dataUrl); setErr(''); setMeta(null); setQuality(null); setBusy(true);
     try {
-      const small = await downscale(dataUrl, 1600);
-      const r = await api.post('/intake/extract', { image: small });
+      // Chấm chất lượng ảnh NGAY trên trình duyệt: chặn ảnh mờ trước khi tốn token AI
+      const { dataUrl: small, quality: q } = await downscaleWithQuality(dataUrl, 1600);
+      const v = qualityVerdict(q);
+      setQuality(v);
+      if (v?.level === 'bad') {
+        setErr('Ảnh mờ quá để AI đọc an toàn — hãy chụp lại: gần hơn, đủ sáng, chữ chiếm phần lớn khung hình.');
+        setBusy(false); return;
+      }
+      const r = await api.post('/intake/extract', { image: small, auto: true }); // P2: xin cổng tự động
       setMeta(r);
+      if (r.autoCreated) { onAuto(r); return; }
       onExtracted(r.fields || {});
     } catch (e) {
       setErr(e.data?.code === 'AI_NOT_CONFIGURED'
-        ? 'AI chưa được cấu hình trên server. Điền AI_API_KEY vào server/.env (gợi ý model: gpt-4o-mini hoặc gpt-4o) rồi khởi động lại. Trong lúc đó dùng kênh Quét QR VNeID hoặc Nhập tay.'
+        ? 'Chưa có engine AI đọc ảnh trên server. Hai phương án: (1) OFFLINE — SSH vào server chạy "apt install tesseract-ocr tesseract-ocr-vie" (không cần internet, không cần key); (2) ĐÁM MÂY — điền AI_API_KEY vào server/.env rồi khởi động lại. Trong lúc đó dùng kênh Quét QR VNeID hoặc Nhập tay.'
         : e.message);
     } finally { setBusy(false); }
   };
@@ -317,13 +327,21 @@ function AiReader({ me, ai, onExtracted }) {
         <input type="file" accept="image/*" capture="environment" hidden onChange={onFile} />
       </label>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8, alignItems: 'center' }}>
-        <span className={`pill ${ai?.aiConfigured ? 'ok' : 'warn'}`}>
-          {ai ? (ai.aiConfigured ? `🤖 Model: ${ai.visionModel}` : '⚠️ Chưa cấu hình AI_API_KEY') : '…'}
+        <span className={`pill ${ai?.aiConfigured ? 'ok' : ai?.provider === 'offline' ? 'ok' : 'warn'}`}>
+          {ai ? (ai.aiConfigured ? `🤖 Model: ${ai.visionModel}`
+            : ai.provider === 'offline' ? '💻 Offline: tesseract-vie (trên server)'
+            : '⚠️ Chưa có engine AI (key đám mây hoặc Tesseract)') : '…'}
         </span>
         <span className="pill info">Pipeline 2 lượt + tự kiểm tra</span>
+        {ai?.autoAvailable && <span className="pill ok">⚡ Tự động ≥ {Math.round((ai.autoThreshold || 0.92) * 100)}%</span>}
+        {(meta?.mock || ai?.mockExtract) && <span className="pill warn">🧪 DEMO mock (AI_MOCK_EXTRACT)</span>}
+        {quality && <span className={`pill ${quality.level === 'ok' ? 'ok' : quality.level === 'bad' ? 'err' : 'warn'}`}>{quality.label}</span>}
       </div>
       <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>
-        Ảnh gửi tới mô hình AI Vision (chuẩn OpenAI-compatible) để trích xuất họ tên, ngày sinh, giới tính, số CCCD —
+        {ai?.provider === 'offline'
+          ? 'Engine OFFLINE: Tesseract OCR + bộ phân tích quy tắc chạy ngay trên server — ảnh KHÔNG rời khỏi máy, không cần internet, không tốn phí API. Độ chính xác tốt với thẻ in rõ; ảnh khó hơn AI đám mây một chút.'
+          : 'Ảnh gửi tới mô hình AI Vision (chuẩn OpenAI-compatible) để trích xuất họ tên, ngày sinh, giới tính, số CCCD —'}
+        {' '}
         kèm <b>độ tin cậy</b> và <b>cảnh báo</b> nếu ảnh mờ/chói. Ảnh được thu nhỏ (1600px, chất lượng cao) trước khi gửi và
         <b> KHÔNG được lưu</b> trong hệ thống. Mẹo: chụp thẳng màn hình, đủ sáng, chữ to chiếm phần lớn khung hình.
       </div>
@@ -336,6 +354,11 @@ function AiReader({ me, ai, onExtracted }) {
           ) : (
             <div style={{ marginTop: 4 }}>Không có cảnh báo — vẫn hãy rà lại tên/ngày sinh/CCCD trước khi tạo.</div>
           )}
+          {meta.autoDecision && !meta.autoCreated && (
+            <div style={{ marginTop: 6, padding: '6px 8px', background: 'rgba(47,121,192,0.08)', borderRadius: 8 }}>
+              {meta.autoDecision.auto ? '⚡ Đủ điều kiện tự động — bấm "Tạo hồ sơ" để hoàn tất.' : `ℹ️ ${meta.autoDecision.reason}`}
+            </div>
+          )}
         </div>
       )}
       {preview && <img src={preview} alt="ảnh đã tải" style={{ width: '100%', borderRadius: 10, marginTop: 8, border: '1px solid var(--line)' }} />}
@@ -343,18 +366,49 @@ function AiReader({ me, ai, onExtracted }) {
   );
 }
 
-async function downscale(dataUrl, max = 1280) {
+async function downscaleWithQuality(dataUrl, max = 1280) {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
       const scale = Math.min(1, max / Math.max(img.width, img.height));
       const c = document.createElement('canvas');
       c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
-      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-      resolve(c.toDataURL('image/jpeg', 0.9));
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      // ── Chấm chất lượng: độ mờ (phương sai Laplacian ảnh xám, lấy mẫu 2px) + độ sáng trung bình ──
+      let blur = null, brightness = null;
+      try {
+        const d = ctx.getImageData(0, 0, c.width, c.height).data;
+        const gray = new Float32Array(c.width * c.height);
+        let sum = 0;
+        for (let i = 0, p = 0; i < d.length; i += 4, p += 1) {
+          const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          gray[p] = g; sum += g;
+        }
+        brightness = sum / gray.length;
+        let ls = 0, lss = 0, n = 0;
+        for (let y = 1; y < c.height - 1; y += 2) {
+          for (let x = 1; x < c.width - 1; x += 2) {
+            const i = y * c.width + x;
+            const lap = -gray[i - 1] - gray[i + 1] - gray[i - c.width] - gray[i + c.width] + 4 * gray[i];
+            ls += lap; lss += lap * lap; n += 1;
+          }
+        }
+        if (n) { const mean = ls / n; blur = lss / n - mean * mean; }
+      } catch { /* không đọc được pixel → bỏ qua chấm chất lượng */ }
+      resolve({ dataUrl: c.toDataURL('image/jpeg', 0.9), quality: { blur, brightness } });
     };
     img.src = dataUrl;
   });
+}
+
+function qualityVerdict(q) {
+  if (!q || q.blur == null) return null;
+  if (q.blur < 25) return { level: 'bad', label: 'Ảnh mờ quá — nên chụp lại' };
+  if (q.blur < 80) return { level: 'warn', label: 'Ảnh hơi mờ — AI có thể đọc sai' };
+  if (q.brightness != null && q.brightness > 215) return { level: 'warn', label: 'Ảnh quá chói (vệt sáng màn hình)' };
+  if (q.brightness != null && q.brightness < 55) return { level: 'warn', label: 'Ảnh quá tối' };
+  return { level: 'ok', label: 'Chất lượng ảnh tốt' };
 }
 
 /* ================= Kết quả: hồ sơ + tài khoản ================= */
@@ -369,7 +423,9 @@ function DonePanel({ done, onAnother }) {
   return (
     <div style={{ maxWidth: 620, margin: '0 auto' }}>
       <div className="card">
-        <div className="card-h"><b>🎉 Đã tạo thành công</b></div>
+        <div className="card-h"><b>🎉 Đã tạo thành công</b>
+          {done.autoCreated && <span className="pill ok">⚡ Tự động bởi AI (job {done.jobId})</span>}
+        </div>
         <div className="card-b">
           <dl className="kv">
             <dt>Họ tên</dt><dd><b>{member.fullName}</b></dd>

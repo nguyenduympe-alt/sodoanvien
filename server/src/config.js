@@ -15,6 +15,13 @@ module.exports = {
   AI_API_KEY: process.env.AI_API_KEY || '',
   AI_MODEL: process.env.AI_MODEL || 'gpt-4o-mini',
 
+  // P2 — Cổng tự động nhập liệu từ ảnh: tin cậy ≥ ngưỡng + 0 cảnh báo + không trùng → tự tạo hồ sơ
+  AI_AUTO_THRESHOLD: (() => { const v = parseFloat(process.env.AI_AUTO_THRESHOLD); return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.92; })(),
+  // CHỈ DÙNG DEMO: AI_MOCK_EXTRACT=1 → extract trả kết quả mẫu không cần AI_API_KEY (để diễn dịch luồng tự động)
+  AI_MOCK_EXTRACT: process.env.AI_MOCK_EXTRACT === '1',
+  // P2b — Engine OFFLINE: 'auto' (mặc định: có key → cloud, không key → offline/Tesseract) | 'cloud' | 'offline'
+  AI_PROVIDER: process.env.AI_PROVIDER || 'auto',
+
   // Tên mạng / channel / chaincode khi chạy với Fabric thật
   FABRIC: {
     CHANNEL: process.env.FABRIC_CHANNEL || 'sochannel',

@@ -29,7 +29,7 @@ cd "$(dirname "$0")/.."  # thư mục gốc đã giải nén của gói release
 echo "═══ 1/7 Cập nhật hệ thống & công cụ cơ bản ═══"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq curl ca-certificates rsync >/dev/null
+apt-get install -y -qq curl ca-certificates rsync tesseract-ocr tesseract-ocr-vie >/dev/null  # tesseract: engine AI offline (P2b)
 
 echo "═══ 2/7 Tạo swap nếu RAM thấp ═══"
 RAM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
@@ -60,11 +60,12 @@ fi
 
 echo "═══ 4/7 Sao chép ứng dụng vào ${APP_DIR} ═══"
 mkdir -p "${APP_DIR}"
-rsync -a --delete \
+# -R (--relative) giữ nguyên đường dẫn tương đối → client/dist về đúng chỗ
+rsync -a --delete -R \
   --exclude 'server/data' --exclude 'server/.env' \
-  server docs deploy README.md client/dist "${APP_DIR}/"
+  ./server ./docs ./deploy ./README.md ./LICENSE ./client/dist "${APP_DIR}/"
 # npm install ngay trên VPS nếu node_modules lỗi kiến trúc (VD: VPS ARM)
-if [ -d server/node_modules ]; then rsync -a server/node_modules "${APP_DIR}/server/"; fi
+if [ -d server/node_modules ]; then rsync -a --delete server/node_modules "${APP_DIR}/server/node_modules/"; fi
 [ -f server/.env.example ] || cp deploy/.env.example "${APP_DIR}/server/.env.example"
 
 echo "═══ 5/7 Tài khoản hệ thống & môi trường ═══"
